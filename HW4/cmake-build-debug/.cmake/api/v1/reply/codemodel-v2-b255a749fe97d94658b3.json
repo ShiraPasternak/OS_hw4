@@ -49,8 +49,8 @@
 	"kind" : "codemodel",
 	"paths" : 
 	{
-		"build" : "C:/Users/shira/Documents/OS/HW4/cmake-build-debug",
-		"source" : "C:/Users/shira/Documents/OS/HW4"
+		"build" : "C:/Users/shira/Documents/OS/OS_hw4/HW4/cmake-build-debug",
+		"source" : "C:/Users/shira/Documents/OS/OS_hw4/HW4"
 	},
 	"version" : 
 	{

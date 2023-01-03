@@ -55,7 +55,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "c:/Users/shira/Documents/OS/HW4/cmake-build-debug"
+			"value" : "c:/Users/shira/Documents/OS/OS_hw4/HW4/cmake-build-debug"
 		},
 		{
 			"name" : "CMAKE_CACHE_MAJOR_VERSION",
@@ -479,7 +479,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "C:/Users/shira/Documents/OS/HW4"
+			"value" : "C:/Users/shira/Documents/OS/OS_hw4/HW4"
 		},
 		{
 			"name" : "CMAKE_INSTALL_PREFIX",
@@ -1095,7 +1095,7 @@
 				}
 			],
 			"type" : "STATIC",
-			"value" : "C:/Users/shira/Documents/OS/HW4/cmake-build-debug"
+			"value" : "C:/Users/shira/Documents/OS/OS_hw4/HW4/cmake-build-debug"
 		},
 		{
 			"name" : "HW4_IS_TOP_LEVEL",
@@ -1119,7 +1119,7 @@
 				}
 			],
 			"type" : "STATIC",
-			"value" : "C:/Users/shira/Documents/OS/HW4"
+			"value" : "C:/Users/shira/Documents/OS/OS_hw4/HW4"
 		}
 	],
 	"kind" : "cache",
