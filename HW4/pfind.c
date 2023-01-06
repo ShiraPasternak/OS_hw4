@@ -10,124 +10,266 @@
 #include <threads.h> //for threads
 #include <unistd.h>
 
-mtx_t queue_mutex;
-
 // Queue struct taken from https://gist.github.com/ArnonEilat/4471278
 // changed needed methods to be threat safe
 
-typedef struct Node_t {
+// task Queue struct
+typedef struct Node_task {
     char* dirName;
-    struct Node_t *prev;
-} Node;
+    cnd_t threadCV;
+    struct Node_task *prev;
+} NodeTask;
 
 /* the HEAD of the Queue, hold the amount of node's that are in the queue*/
-typedef struct Queue {
-    Node *head;
-    Node *tail;
+typedef struct Queue_task {
+    NodeTask *head;
+    NodeTask *tail;
     int size;
     int limit;
-} Queue;
+} TaskQueue;
 
-Queue *constructQueue(/*int limit*/);
-void destructQueue(Queue *queue);
-bool enqueue(Queue *pQueue, Node *item);
-Node *dequeue(Queue *pQueue);
-bool isEmpty(Queue* pQueue);
+// threads Queue struct
+typedef struct Node_thread {
+    long threadId;
+    cnd_t threadCV;
+    struct Node_thread *prev;
+} NodeThread;
 
-Queue *constructQueue(/*int limit*/) {
-    Queue *queue = (Queue*) malloc(sizeof (Queue));
-    if (queue == NULL) {
+/* the HEAD of the Queue, hold the amount of node's that are in the queue*/
+typedef struct Queue_thread {
+    NodeThread *head;
+    NodeThread *tail;
+    int size;
+    int limit;
+} ThreadQueue;
+
+mtx_t task_queue_mutex;
+mtx_t threads_queue_mutex;
+
+atomic_int thread_failed = 0, success_counter = 0;
+atomic_int t_sleeping = 0;
+int numOfThreads;
+thrd_t thread_ids[numOfThreads];
+cnd_t cnd_for_search_threads[numOfThreads];
+TaskQueue *searchQueue;
+ThreadQueue *threadQueue;
+cnd_t start_cv;
+mtx_t start_mutex;
+
+TaskQueue *constructTaskQueue(/*int limit*/);
+void destructTaskQueue(TaskQueue *taskQueue);
+bool enqueue(TaskQueue *pTaskQueue, NodeTask *item);
+NodeTask *dequeue(TaskQueue *pTaskQueue);
+bool isEmpty(TaskQueue* pTaskQueue);
+
+ThreadQueue *constructThreadQueue(int limit);
+void destructThreadQueue(ThreadQueue *threadQueue);
+bool enqueueThread(ThreadQueue *pThreadQueue, NodeThread *item);
+NodeThread *dequeueThread(ThreadQueue *pThreadQueue);
+bool isThreadQueueEmpty(ThreadQueue* pThreadQueue);
+
+bool rootDirIsSearchable(char *dir);
+void handleDirIsNotSearchable(char *dir);
+void createThreads(int n);
+void createConditionVariables(int n);
+int handleSearchByThreads(void *t);
+cnd_t getCDbyThreadId(long tId);
+void assignCVToTask(TaskQueue *tq); //todo
+void wakeUpThreadByFifoOrder(); //todo
+void addRelevantSubDirsToQueue(char *name); //todo
+NodeTask *dequeueTaskByCv(cnd_t cv, TaskQueue *tq);
+
+// task Queue methods
+TaskQueue *constructTaskQueue(/*int limit*/) {
+    TaskQueue *taskQueue = (TaskQueue*) malloc(sizeof (TaskQueue));
+    if (taskQueue == NULL) {
         return NULL;
     }
     /*if (limit <= 0) {
         limit = 65535;
     } */
-    queue->limit = 65535;
-    queue->size = 0;
-    queue->head = NULL;
-    queue->tail = NULL;
+    taskQueue->limit = 65535;
+    taskQueue->size = 0;
+    taskQueue->head = NULL;
+    taskQueue->tail = NULL;
 
-    return queue;
+    return taskQueue;
 }
 
-void destructQueue(Queue *queue) {
-    Node *pN;
-    while (!isEmpty(queue)) {
-        pN = dequeue(queue);
+void destructTaskQueue(TaskQueue *taskQueue) {
+    NodeTask *pN;
+    while (!isEmpty(taskQueue)) {
+        pN = dequeue(taskQueue);
         free(pN-> dirName);
         free(pN);
     }
-    free(queue);
+    free(taskQueue);
 }
 
-bool enqueue(Queue *pQueue, Node *item) {
-    mtx_lock(&queue_mutex);
-    if ((pQueue == NULL) || (item == NULL)) {
+bool enqueue(TaskQueue *pTaskQueue, NodeTask *item) {
+    mtx_lock(&task_queue_mutex);
+    if ((pTaskQueue == NULL) || (item == NULL)) {
         return false;
     }
     // if(pQueue->limit != 0)
-    if (pQueue->size >= pQueue->limit) {
+    if (pTaskQueue->size >= pTaskQueue->limit) {
         return false;
     }
-    /*the queue is empty*/
     item->prev = NULL;
-    if (pQueue->size == 0) {
-        pQueue->head = item;
-        pQueue->tail = item;
+    /*the TaskQueue is empty*/
+    if (pTaskQueue->size == 0) {
+        pTaskQueue->head = item;
+        pTaskQueue->tail = item;
 
     } else {
         /*adding item to the end of the queue*/
-        pQueue->tail->prev = item;
-        pQueue->tail = item;
+        pTaskQueue->tail->prev = item;
+        pTaskQueue->tail = item;
     }
-    pQueue->size++;
-    mtx_unlock(&queue_mutex);
+    pTaskQueue->size++;
+
+    if (pTaskQueue->size < numOfThreads) {
+        assignCVToTask(pTaskQueue);
+        wakeUpThreadByFifoOrder();
+    }
+    mtx_unlock(&task_queue_mutex);
     return true;
 }
 
-Node * dequeue(Queue *pQueue) {
-    /*the queue is empty or bad param*/
-    Node *item;
-    mtx_lock(&queue_mutex);
-    if (isEmpty(pQueue))
+NodeTask * dequeue(TaskQueue *pTaskQueue) {
+    NodeTask *item;
+    NodeThread *nodeThread;
+    mtx_lock(&task_queue_mutex);
+    cnd_t cv = getCDbyThreadId(thrd_current());
+    nodeThread ->threadId = thrd_current();
+    nodeThread ->threadCV = cv;
+    if (cv == NULL) {
+        fprintf(stderr, "%s%ld\n", "Failed to find cv for thread id", thrd_current());
         return NULL;
-    item = pQueue->head;
-    pQueue->head = (pQueue->head)->prev;
-    pQueue->size--;
-    mtx_unlock(&queue_mutex);
+    }
+    while (isEmpty(pTaskQueue)) {
+        t_sleeping++;
+        enqueueThread(threadQueue, nodeThread);
+        cnd_wait(&cv, &task_queue_mutex);
+    }
+    cnd_t assigned_cv = pTaskQueue->head->threadCV;
+    if (assigned_cv == NULL/* || assigned_cv == cv*/){
+        item = pTaskQueue->head;
+        pTaskQueue->head = (pTaskQueue->head)->prev;
+        pTaskQueue->size--;
+    }
+    else {
+        item = dequeueTaskByCv(cv, pTaskQueue);
+    }
+    mtx_unlock(&task_queue_mutex);
     return item;
 }
 
-bool isEmpty(Queue* pQueue) {
-    if (pQueue == NULL) {
+NodeTask *dequeueTaskByCv(cnd_t cv, TaskQueue *tq) {
+    NodeTask *nodeTask, *nextNodeTask;
+    nextNodeTask = tq->head;
+    nodeTask = nextNodeTask->prev;
+    while(nodeTask != NULL) {
+        if (nodeTask->threadCV == cv) {
+            nextNodeTask->prev = nodeTask->prev;
+            if (nodeTask->prev == NULL)
+                tq->tail = nextNodeTask;
+            tq->size--;
+        }
+        nextNodeTask = nodeTask;
+        nodeTask = nodeTask->prev;
+    }
+}
+
+bool isEmpty(TaskQueue* pTaskQueue) {
+    if (pTaskQueue == NULL) {
         return false;
     }
-    if (pQueue->size == 0) {
+    if (pTaskQueue->size == 0) {
         return true;
     } else {
         return false;
     }
 }
 
-bool rootDirIsSearchable(char *dir);
-void handleDirIsNotSearchable(char *dir);
-void createThreads(int n);
-int handleSearchByThreads(void *t);
+// threads Queue methods
+ThreadQueue *constructThreadQueue(int limit) {
+    ThreadQueue *threadQueue = (ThreadQueue*) malloc(sizeof (ThreadQueue));
+    if (threadQueue == NULL) {
+        return NULL;
+    }
+    if (limit <= 0) {
+        limit = 65535;
+    }
+    threadQueue->limit = limit;
+    threadQueue->size = 0;
+    threadQueue->head = NULL;
+    threadQueue->tail = NULL;
 
-atomic_int thread_failed = 0, success_counter = 0;
-atomic_int t_sleeping = 0;
-int numOfThreads;
-thrd_t thread_ids[numOfThreads];
-Queue *searchQueue;
-cnd_t start_cv;
-mtx_t start_mutex;
+    return threadQueue;
+}
+
+void destructThreadQueue(ThreadQueue *ThreadQueue) {
+    NodeTask *pN;
+    while (!isEmpty(ThreadQueue)) {
+        pN = dequeue(ThreadQueue);
+        free(pN);
+    }
+    free(ThreadQueue);
+}
+
+bool enqueueThread(ThreadQueue *pThreadQueue, NodeThread *item) {
+    mtx_lock(&threads_queue_mutex);
+    if ((pThreadQueue == NULL) || (item == NULL)) {
+        return false;
+    }
+    // if(pQueue->limit != 0)
+    if (pThreadQueue->size >= pThreadQueue->limit) {
+        return false;
+    }
+    /*the ThreadQueue is empty*/
+    item->prev = NULL;
+    if (pThreadQueue->size == 0) {
+        pThreadQueue->head = item;
+        pThreadQueue->tail = item;
+
+    } else {
+        /*adding item to the end of the queue*/
+        pThreadQueue->tail->prev = item;
+        pThreadQueue->tail = item;
+    }
+    pThreadQueue->size++;
+    mtx_unlock(&threads_queue_mutex);
+    return true;
+}
+
+NodeThread * dequeueThread(ThreadQueue *pThreadQueue) {
+    NodeThread *item;
+    mtx_lock(&task_queue_mutex);
+    item = pThreadQueue->head;
+    pThreadQueue->head = (pThreadQueue->head)->prev;
+    pThreadQueue->size--;
+    mtx_unlock(&task_queue_mutex);
+    return item;
+}
+
+bool isThreadQueueEmpty(ThreadQueue* pThreadQueue) {
+    if (pThreadQueue == NULL) {
+        return false;
+    }
+    if (pThreadQueue->size == 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
 
 void handleDirIsNotSearchable(char *dir) {
     printf("Directory %s: Permission denied.\n", dir);
 }
 
 bool rootDirIsSearchable(char *dir) {
-    if (access(dir, R_OK && X_OK) == 0) {
+    if (access(dir, R_OK | X_OK) == 0) {
         return true;
     }
     return false;
@@ -137,44 +279,79 @@ void createThreads(int n) {
     for (size_t i = 0; i < n; i++) {
         int rc = thrd_create(&thread_ids[i], handleSearchByThreads, (void *)i);
         if (rc != thrd_success) {
-            fprintf(stderr, "Failed creating thread\n");
+            fprintf(stderr,"%s\n", "Failed creating thread");
+        }
+    }
+}
+
+void createConditionVariables(int n) {
+    for (size_t i = 0; i < n; i++) {
+        int rc = cnd_init(&cnd_for_search_threads[i]);
+        if (rc != thrd_success) {
+            fprintf(stderr, "%s\n", "Failed creating cv for thread");
         }
     }
 }
 
 int handleSearchByThreads(void *t) {
-    long my_id = (long)t;
-    Node *dirNode;
+    long thread_id = (long)t;
+    NodeTask *dirNode;
 
-    printf("handleSearchByThreads(): thread %ld\n", my_id);
-    mtx_lock(&queue_mutex);
+    printf("handleSearchByThreads(): thread %ld\n", thread_id);
+    mtx_lock(&task_queue_mutex);
     if (cnd_wait(&start_cv, &start_mutex)) {
         // handle error todo
     }
-    mtx_unlock(&queue_mutex);
+    mtx_unlock(&task_queue_mutex);
 
     printf("handleSearchByThreads(): thread %ld Condition signal received.\n", my_id);
 
-    if (isEmpty(searchQueue)) {
-        t_sleeping++;
-        cnd_wait();
-    }
-    else {
-        if (t_sleeping!=0)
-            t_sleeping--;
+    while(1) { //consider if its the best solution todo
         dirNode = dequeue(searchQueue);
-        handleDir(dirNode);
-        if (t_sleeping = )
+        addRelevantSubDirsToQueue(dirNode ->dirName);
     }
 
 }
 
+void addRelevantSubDirsToQueue(char *name) {
+    
+}
+
+cnd_t getCDbyThreadId(long tId) {
+    for (int i = 0; i < numOfThreads; i++) {
+        if (thread_ids[i] == tId) {
+            return cnd_for_search_threads[i];
+        }
+    }
+    return NULL;
+}
+
+void assignCVToTask(TaskQueue *tq) {
+    NodeTask *nodeTask = tq->head;
+    NodeThread *nodeThread = threadQueue->head;
+    while (nodeTask != NULL && nodeThread != NULL) {
+        if (nodeTask->threadCV == NULL){
+            nodeTask->threadCV = nodeThread->threadCV;
+            nodeThread = nodeThread->prev;
+        }
+        nodeTask = nodeTask->prev;
+    }
+}
+
+void wakeUpThreadByFifoOrder() {
+    NodeThread *nodeThread;
+    for (int i = 0; i < threadQueue->size; ++i) {
+        nodeThread = dequeueThread(threadQueue);
+        cnd_signal(&nodeThread->threadCV);
+    }
+}
+
 int main(int argc, char **argv) {
     char *rootDir, *searchTerm;
-    Node *dirNode;
+    NodeTask *dirNode;
 
     if (argc != 4) {
-        fprintf(stderr,"%s","incorrect number of inputs\n");
+        fprintf(stderr,"%s\n","incorrect number of inputs");
         exit(1);
     } else if(!rootDirIsSearchable(argv[1])){
         handleDirIsNotSearchable(argv[1]);
@@ -184,16 +361,21 @@ int main(int argc, char **argv) {
         searchTerm = argv[2];
         sscanf(argv[3], "%d", &numOfThreads);
     }
-    // init search queue
+    // init queues
     searchQueue = constructQueue();
-    dirNode = (Node*)malloc(sizeof(Node));
+    threadQueue = constructThreadQueue(numOfThreads);
+
+    // init search process
+    dirNode = (NodeTask *)malloc(sizeof(NodeTask));
     strcpy(dirNode ->dirName, rootDir);
     if (!enqueue(searchQueue, dirNode)){
+        fprintf(stderr,"%s\n","incorrect number of inputs");
+        exit(1);
         //handle error in queue todo
     }
     cnd_init(&start_cv);
     createThreads(numOfThreads);
-    cndForThreads = createCnds(numOfThreads);
+    createConditionVariables(numOfThreads);
 
     // --- Wait for threads to finish --- not sure if needed
     for (long t = 0; t < NUM_THREADS; ++t) {
